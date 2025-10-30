@@ -267,7 +267,7 @@ class ElasticDecoderLayer(nn.Module):
         attn_output = self.self_attn(norm_input) 
         
         # 策略感知调制 (Attention Output)
-        attn_output = self.attn_mod(attn_output, self.ha_ratio) 
+        attn_output = self.attn_mod(attn_output[0], self.ha_ratio) 
         hidden_states = residual + attn_output # Add
         
         # --- MLP Sub-Block ---
