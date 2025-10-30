@@ -73,16 +73,14 @@ class ElasticLinear(nn.Module):
         return F.linear(x_cropped, W, b)
 
 class ElasticAttention(nn.Module):
-    """可伸缩的多头注意力机制 (支持 Grouped Query Attention)"""
-    def __init__(self, base_attn: nn.Module, config: PretrainedConfig):
+    def __init__(self, base_attn, config):
         super().__init__()
         self.config = config
         self.num_heads = config.num_attention_heads
         self.head_dim = config.hidden_size // config.num_attention_heads
         self.max_hidden = config.hidden_size
-        self.num_kv_heads = getattr(config, 'num_key_value_heads', self.num_heads)
+        self.num_kv_heads = config.num_key_value_heads
 
-        # QKV 和 O 投影使用 ElasticLinear
         self.q_proj = ElasticLinear(base_attn.q_proj)
         self.k_proj = ElasticLinear(base_attn.k_proj)
         self.v_proj = ElasticLinear(base_attn.v_proj)
@@ -92,69 +90,110 @@ class ElasticAttention(nn.Module):
         self.active_hidden = self.max_hidden
         self.active_kv_heads = self.num_kv_heads
 
-    def set_active_heads(self, ha_ratio: float = 1.0, h_ratio: float = 1.0):
-        # 计算激活的头数
+    # ... (set_active_heads 方法保持不变) ...
+    def set_active_heads(self, ha_ratio=1.0, h_ratio=1.0):
         self.active_heads = max(1, int(self.num_heads * ha_ratio))
         self.active_kv_heads = max(1, int(self.num_kv_heads * ha_ratio))
 
-        # 计算激活的隐藏维度
-        self.active_hidden = max(1, int(self.max_hidden * h_ratio))
+        self.active_hidden = int(self.max_hidden * h_ratio)
 
-        # 根据激活头数和头维度计算 QKV 投影的输出维度
         qkv_out_dim = self.active_heads * self.head_dim
         kv_out_dim = self.active_kv_heads * self.head_dim
-        
-        # 设置 QKV 投影的输入和输出比例
+
         self.q_proj.set_active_size(in_ratio=h_ratio, out_ratio=qkv_out_dim / self.q_proj.max_out)
         self.k_proj.set_active_size(in_ratio=h_ratio, out_ratio=kv_out_dim / self.k_proj.max_out)
         self.v_proj.set_active_size(in_ratio=h_ratio, out_ratio=kv_out_dim / self.v_proj.max_out)
 
-        # 设置 O 投影的输入和输出比例
         self.o_proj.set_active_size(
             in_ratio=qkv_out_dim / self.o_proj.max_in,
             out_ratio=h_ratio 
         )
 
-    def forward(self, hidden_states: torch.Tensor, **kwargs):
-        B, T, H = hidden_states.size()
+    def forward(
+        self, 
+        hidden_states: torch.Tensor, 
+        attention_mask: Optional[torch.Tensor] = None,
+        past_key_value: Optional[Tuple[torch.Tensor]] = None,
+        **kwargs
+    ) -> Tuple[torch.Tensor, Optional[Tuple[torch.Tensor]]]:
+        B, T_new, H = hidden_states.size() # T_new is the length of the new input
 
-        # 裁剪输入隐藏状态（如果 active_hidden < max_hidden）
+        # 1. Subnet Selection (Hidden Dimension)
         if self.active_hidden < self.max_hidden:
             hidden_states = hidden_states[..., :self.active_hidden]
 
-        # 投影
+        # 2. QKV Projection (using active subnet)
         q = self.q_proj(hidden_states)
         k = self.k_proj(hidden_states)
         v = self.v_proj(hidden_states)
 
-        # 维度重塑和转置
         num_heads = self.active_heads
         kv_heads = self.active_kv_heads
-        head_dim = self.head_dim # head_dim 保持不变
+        head_dim = self.head_dim
 
-        q = q.view(B, T, num_heads, head_dim).transpose(1, 2) # (B, num_heads, T, head_dim)
-        k = k.view(B, T, kv_heads, head_dim).transpose(1, 2)  # (B, kv_heads, T, head_dim)
-        v = v.view(B, T, kv_heads, head_dim).transpose(1, 2)  # (B, kv_heads, T, head_dim)
+        # 3. Reshape QKV
+        q = q.view(B, T_new, num_heads, head_dim).transpose(1, 2)  # (B, H, T_new, D)
+        k = k.view(B, T_new, kv_heads, head_dim).transpose(1, 2)    # (B, KvH, T_new, D)
+        v = v.view(B, T_new, kv_heads, head_dim).transpose(1, 2)    # (B, KvH, T_new, D)
 
-        # GQA/MQA 复制
+        # 4. KV Cache Integration (for incremental decoding)
+        new_past_key_value = (k, v)
+        if past_key_value is not None:
+            # past_key_value contains (past_k, past_v)
+            past_k, past_v = past_key_value 
+            # Concatenate past keys/values with current keys/values
+            k = torch.cat([past_k, k], dim=2)
+            v = torch.cat([past_v, v], dim=2)
+            # Update the cache with the full K, V
+            new_past_key_value = (k, v) 
+        
+        T_full = k.size(2) # T_full is the total sequence length (past + new)
+
+        # 5. Grouped Query Attention (GQA) logic
         repeat_factor = num_heads // kv_heads
         if repeat_factor > 1:
+            # Repeats K and V heads to match the number of Q heads
             k = k.repeat_interleave(repeat_factor, dim=1)
             v = v.repeat_interleave(repeat_factor, dim=1)
 
-        # Attention 计算
-        # attn = Q * K^T / sqrt(d_k)
-        attn = torch.matmul(q, k.transpose(-2, -1)) / (head_dim ** 0.5)
-        # ⚠️ 原始代码省略了 attention_mask 的应用，但在实际中需要，这里保持原样
-        attn = F.softmax(attn, dim=-1)
+        # 6. Attention Score (Q @ K^T)
+        # (B, H, T_new, D) @ (B, H, D, T_full) -> (B, H, T_new, T_full)
+        attn_weights = torch.matmul(q, k.transpose(-2, -1)) / (head_dim ** 0.5)
+
+        # 7. Attention Mask Application
+        if attention_mask is not None:
+            # Mask is usually (B, 1, T_new, T_full) or similar
+            # Add a large negative number to masked positions (where attention_mask is 0/False)
+            if attention_mask.dim() == 4:
+                # Add the mask directly (standard for transformers)
+                attn_weights = attn_weights + attention_mask
+            else:
+                # Simple case: (B, T_full) mask for padding/causality (needs expansion)
+                # Note: Exact mask shape handling depends on the calling Qwen model's format
+                # For safety, we rely on the caller to provide the correct 4D mask in practice.
+                
+                # A standard mask application logic (simplified):
+                if attention_mask.dim() == 2: # (B, T_full) padding mask 
+                    # Assuming attention_mask is 0 for padding, 1 for real tokens
+                    mask_4d = attention_mask.unsqueeze(1).unsqueeze(2) # (B, 1, 1, T_full)
+                    mask_4d = (1.0 - mask_4d) * torch.finfo(attn_weights.dtype).min
+                    # We only apply the mask if we are processing the full sequence or the mask shape matches
+                    if T_full == mask_4d.size(-1):
+                         attn_weights = attn_weights + mask_4d
+
+        # 8. Softmax and Output
+        attn = F.softmax(attn_weights, dim=-1)
+        
+        # (B, H, T_new, T_full) @ (B, H, T_full, D) -> (B, H, T_new, D)
         out = torch.matmul(attn, v)
 
-        # 恢复维度
-        out = out.transpose(1, 2).contiguous().view(B, T, num_heads * head_dim)
-
-        # 输出投影
+        # 9. Final Projection
+        out = out.transpose(1, 2).contiguous().view(B, T_new, num_heads * head_dim)
         out = self.o_proj(out)
-        return out
+        
+        # Return the output and the updated KV cache
+        return out, new_past_key_value
+
 
 class ElasticMLP(nn.Module):
     """可伸缩的前馈网络 (FFN)"""
