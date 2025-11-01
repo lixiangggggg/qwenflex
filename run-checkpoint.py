@@ -5,7 +5,7 @@ from model_wrappers import ElasticQwenForTraining
 from router import ElasticRouter,BudgetEncoder
 from transformers import AutoModelForCausalLM, AutoTokenizer
 # Replace with the desired Qwen model name
-model_name = "Qwen/Qwen-2.5-0.5B"
+model_name = "Qwen/Qwen2.5-0.5B"
 from config import (
     CKPT_PATH
 )
