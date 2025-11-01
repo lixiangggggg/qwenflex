@@ -14,7 +14,7 @@ tokenizer = AutoTokenizer.from_pretrained(model_name, trust_remote_code=True)
 model_full = AutoModelForCausalLM.from_pretrained(model_name, trust_remote_code=True).eval()
 
 # Move to GPU if available
-device = "cuda2" if torch.cuda.is_available() else "cpu"
+device = "cuda：2" if torch.cuda.is_available() else "cpu"
 model_full = model_full.to(device)
 
 question = "What is the capital of France?"
