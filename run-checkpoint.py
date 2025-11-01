@@ -45,6 +45,9 @@ router=router.to(device)
 # Example input, adjust shape/type as needed
 buget = 0.5    
 # Pass through router and then model
+# ... (Previous code)
+
+# Pass through router and then model
 with torch.no_grad():
     enbeded_buget = encoder(buget)
     router_output = router(enbeded_buget)
@@ -54,17 +57,17 @@ with torch.no_grad():
     layer_mask = router_output["layer_mask"]
     current_tau = router_output["tau"]
     model_sub.set_active_subnet(
-                h_ratio=h_ratio, 
-                ha_ratio=ha_ratio, 
-                intermediate_ratio=inter_ratio, 
-                layer_mask=layer_mask
-            )
+        h_ratio=h_ratio, 
+        ha_ratio=ha_ratio, 
+        intermediate_ratio=inter_ratio, 
+        layer_mask=layer_mask
+    )
     start_sub = time.time()
     output_sub = model_sub.generate(**inputs, max_new_tokens=128)
-  answer_sub = tokenizer.decode(output_sub[0], skip_special_tokens=True)
-  end_sub = time.time()
-  print("Model_sub's answer:", answer_sub)
-  print("the cost time of model_sub:",end_sub-star_sub)
-        
+    # ⬇️ FIX: Ensure these lines are indented correctly (e.g., 4 spaces inside 'with')
+    answer_sub = tokenizer.decode(output_sub[0], skip_special_tokens=True)
+    end_sub = time.time()
+    print("Model_sub's answer:", answer_sub)
+    print("the cost time of model_sub:", end_sub - start_sub)
 
 
