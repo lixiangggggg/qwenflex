@@ -40,6 +40,8 @@ model_sub.load_state_dict(checkpoint["model_state_dict"])
 router.load_state_dict(checkpoint["router_state_dict"])
 model_sub.eval()
 router.eval()
+model_sub = model_sub.to(device)
+router=router.to(device)
 # Example input, adjust shape/type as needed
 buget = 0.5    
 # Pass through router and then model
