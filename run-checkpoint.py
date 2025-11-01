@@ -48,7 +48,7 @@ buget = 0.5
 with torch.no_grad():
     enbeded_buget = encoder(buget)
     router_output = router(enbeded_buget)
-    h_ratio = float(router_output["hidden_ratio"]
+    h_ratio = float(router_output["hidden_ratio"])
     ha_ratio = float(router_output["head_ratio"])
     inter_ratio = float(router_output["inter_ratio"])
     layer_mask = router_output["layer_mask"]
