@@ -1,5 +1,5 @@
 import torch
-
+import time
 # Replace with your actual model and router class imports
 from model_wrappers import ElasticQwenForTraining
 from router import ElasticRouter,BudgetEncoder
@@ -20,11 +20,12 @@ model_full = model_full.to(device)
 question = "What is the capital of France?"
 inputs = tokenizer(question, return_tensors="pt").to(device)
 with torch.no_grad():
+    star_full = time.time()
     output = model_full.generate(**inputs, max_new_tokens=128)
 answer = tokenizer.decode(output[0], skip_special_tokens=True)
-
+end_full = time.time()
 print("Model_full's answer:", answer)
-
+print("the cost time of model_full:",end_full-star_full)
 # Update to your actual checkpoint path
 CHECKPOINT_PATH = CKPT_PATH
 
@@ -56,9 +57,12 @@ with torch.no_grad():
                 intermediate_ratio=inter_ratio, 
                 layer_mask=layer_mask
             )
+    start_sub = time.time()
     output_sub = model_sub.generate(**inputs, max_new_tokens=128)
   answer_sub = tokenizer.decode(output_sub[0], skip_special_tokens=True)
+  end_sub = time.time()
   print("Model_sub's answer:", answer_sub)
+  print("the cost time of model_sub:",end_sub-star_sub)
         
 
 
